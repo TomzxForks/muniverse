@@ -616,11 +616,14 @@ func connectDevTools(ctx context.Context, host string) (conn *chrome.Conn,
 
 func attemptDevTools(ctx context.Context, host string) (conn *chrome.Conn,
 	err error) {
+	fmt.Println("attempting to list endpoints...")
 	endpoints, err := chrome.Endpoints(ctx, host)
 	if err != nil {
+		fmt.Println("failed to list endpoints!")
 		return
 	}
 
+	fmt.Println("attempting to connect to endpoint")
 	for _, ep := range endpoints {
 		if ep.Type == "page" && ep.WebSocketURL != "" {
 			fmt.Println("attempting websocket connection", ep.WebSocketURL)
@@ -628,5 +631,7 @@ func attemptDevTools(ctx context.Context, host string) (conn *chrome.Conn,
 		}
 	}
 
+	epData, _ := json.Marshal(endpoints)
+	fmt.Println("no endpoint in", string(epData))
 	return nil, errors.New("no Chrome page endpoint")
 }
