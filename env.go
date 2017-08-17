@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -203,10 +205,15 @@ func newEnvDocker(image, volume string, spec *EnvSpec) (env *rawEnv, err error) 
 
 	var id string
 
+	fmt.Println("Trying docker run...")
+
 	// Retry as a workaround for an occasional error given
 	// by `docker run`.
 	for i := 0; i < 3; i++ {
 		id, err = dockerRun(ctx, image, volume, spec)
+		if err != nil {
+			fmt.Println("run failed", err)
+		}
 		if err == nil || !strings.Contains(err.Error(), occasionalDockerErr) {
 			break
 		}
@@ -216,22 +223,38 @@ func newEnvDocker(image, volume string, spec *EnvSpec) (env *rawEnv, err error) 
 		return
 	}
 
+	fmt.Println("Getting ports and address...")
+
 	ports, err := dockerBoundPorts(ctx, id)
 	if err != nil {
 		return
 	}
 
-	conn, err := connectDevTools(ctx, "localhost:"+ports["9222/tcp"])
+	addr, err := dockerIPAddress(ctx)
 	if err != nil {
 		return
 	}
 
-	killSock, err := (&net.Dialer{}).DialContext(ctx, "tcp",
-		"localhost:"+ports["1337/tcp"])
+	fmt.Println("address is:", addr)
+	fmt.Println("ports are:", ports)
+
+	conn, err := connectDevTools(ctx, addr+":"+ports["9222/tcp"])
 	if err != nil {
+		fmt.Println("failed to connect to devtools:", err)
+		return
+	}
+
+	fmt.Println("connected to devtools")
+
+	killSock, err := (&net.Dialer{}).DialContext(ctx, "tcp",
+		addr+":"+ports["1337/tcp"])
+	if err != nil {
+		fmt.Println("failed to connect to kill socket:", err)
 		conn.Close()
 		return
 	}
+
+	fmt.Println("created environment!")
 
 	return &rawEnv{
 		spec:        *spec,
@@ -536,12 +559,22 @@ func dockerBoundPorts(ctx context.Context,
 	return
 }
 
+func dockerIPAddress(ctx context.Context) (addr string, err error) {
+	if runtime.GOOS != "windows" {
+		return "localhost", nil
+	}
+	return getDockerMachineDefaultIp(ctx)
+}
+
 var dockerLock sync.Mutex
 
 func dockerCommand(ctx context.Context, args ...string) (output []byte, err error) {
 	dockerLock.Lock()
 	defer dockerLock.Unlock()
-	output, err = exec.CommandContext(ctx, "docker", args...).Output()
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	println(cmd.Path + " " + strings.Join(cmd.Args, " "))
+	setEnvironment(cmd)
+	output, err = cmd.Output()
 	if err != nil {
 		if eo, ok := err.(*exec.ExitError); ok && len(eo.Stderr) > 0 {
 			stderrMsg := strings.TrimSpace(string(eo.Stderr))
@@ -549,6 +582,57 @@ func dockerCommand(ctx context.Context, args ...string) (output []byte, err erro
 		}
 	}
 	return
+}
+
+func setEnvironment(cmd *exec.Cmd) {
+	if runtime.GOOS == "windows" {
+		vars := getWindowsEnvironmentVariables()
+		env := os.Environ()
+		for key, value := range vars {
+			env = append(env, fmt.Sprintf("%s=%s", key, value))
+		}
+		cmd.Env = env
+	}
+}
+
+func getWindowsEnvironmentVariables() map[string]string {
+	output, err := exec.Command("docker-machine", "env", "--shell", "cmd").Output()
+	if err != nil {
+		// TODO(tom.rochette@coreteks.org): return an error
+	}
+
+	stringOutput := string(output)
+
+	result := map[string]string{}
+	lines := strings.Split(stringOutput, "\n")
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "SET") {
+			continue
+		}
+
+		line = line[4:]
+		parts := strings.SplitN(line, "=", 2)
+		result[parts[0]] = parts[1]
+	}
+
+	return result;
+}
+
+func getDockerMachineDefaultIp(ctx context.Context) (addr string, err error) {
+	defer essentials.AddCtxTo("get IP of Docker VM", &err)
+	cmd := exec.CommandContext(ctx, "docker-machine", "ip", "default")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+	cleanIP := strings.TrimSpace(string(output))
+
+	// Will detect pretty much any error message.
+	if strings.ContainsAny(cleanIP, " \n\t") {
+		return "", errors.New("unexpected output: " + string(output))
+	}
+
+	return cleanIP, nil
 }
 
 func connectDevTools(ctx context.Context, host string) (conn *chrome.Conn,
@@ -569,16 +653,22 @@ func connectDevTools(ctx context.Context, host string) (conn *chrome.Conn,
 
 func attemptDevTools(ctx context.Context, host string) (conn *chrome.Conn,
 	err error) {
+	fmt.Println("attempting to list endpoints...")
 	endpoints, err := chrome.Endpoints(ctx, host)
 	if err != nil {
+		fmt.Println("failed to list endpoints!")
 		return
 	}
 
+	fmt.Println("attempting to connect to endpoint")
 	for _, ep := range endpoints {
 		if ep.Type == "page" && ep.WebSocketURL != "" {
+			fmt.Println("attempting websocket connection", ep.WebSocketURL)
 			return chrome.NewConn(ctx, ep.WebSocketURL)
 		}
 	}
 
+	epData, _ := json.Marshal(endpoints)
+	fmt.Println("no endpoint in", string(epData))
 	return nil, errors.New("no Chrome page endpoint")
 }
