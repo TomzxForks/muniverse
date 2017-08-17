@@ -204,10 +204,15 @@ func newEnvDocker(image, volume string, spec *EnvSpec) (env *rawEnv, err error) 
 
 	var id string
 
+	fmt.Println("Trying docker run...")
+
 	// Retry as a workaround for an occasional error given
 	// by `docker run`.
 	for i := 0; i < 3; i++ {
 		id, err = dockerRun(ctx, image, volume, spec)
+		if err != nil {
+			fmt.Println("run failed", err)
+		}
 		if err == nil || !strings.Contains(err.Error(), occasionalDockerErr) {
 			break
 		}
@@ -216,6 +221,8 @@ func newEnvDocker(image, volume string, spec *EnvSpec) (env *rawEnv, err error) 
 	if err != nil {
 		return
 	}
+
+	fmt.Println("Getting ports and address...")
 
 	ports, err := dockerBoundPorts(ctx, id)
 	if err != nil {
@@ -227,17 +234,26 @@ func newEnvDocker(image, volume string, spec *EnvSpec) (env *rawEnv, err error) 
 		return
 	}
 
+	fmt.Println("address is:", addr)
+	fmt.Println("ports are:", ports)
+
 	conn, err := connectDevTools(ctx, addr+":"+ports["9222/tcp"])
 	if err != nil {
+		fmt.Println("failed to connect to devtools:", err)
 		return
 	}
+
+	fmt.Println("connected to devtools")
 
 	killSock, err := (&net.Dialer{}).DialContext(ctx, "tcp",
 		addr+":"+ports["1337/tcp"])
 	if err != nil {
+		fmt.Println("failed to connect to kill socket:", err)
 		conn.Close()
 		return
 	}
+
+	fmt.Println("created environment!")
 
 	return &rawEnv{
 		spec:        *spec,
